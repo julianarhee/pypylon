@@ -4,6 +4,7 @@ from pypylon import pylon
 from pypylon import genicam
 from serial import Serial
 
+import array
 import sys
 import errno
 import os
@@ -23,18 +24,6 @@ from samples.imageeventprinter import ImageEventPrinter
 
 current_ms_time = lambda: int(round(time.time() * 1000))
 
-def getkey():
-    return input("Enter \"s\" to trigger the camera or \"q\" to exit and press enter? (s/q) ")
-
-def flushBuffer():
-    #Flush out serial buffer
-    global ser
-#    ser.flushInput()
-#    ser.flushOutput()
-    tmp=0;
-    while tmp is not b'':
-        print('.. flushing ...')
-        tmp=ser.read()
 
 def extract_options(options):
 
@@ -48,6 +37,7 @@ def extract_options(options):
     parser.add_option('--write-thread', action="store_false", dest="save_in_separate_process", help="spawn threads for disk-writer")
     parser.add_option('--frame-rate', action="store", dest="frame_rate", help="requested frame rate", type="float", default=60.0)
     parser.add_option('--port', action="store", dest="port", help="port for arduino (default: /dev/ttyUSB0)", default='/dev/ttyUSB0')
+    parser.add_option('--disable', action='store_false', dest='enable_framerate', default=True, help='Flag to disable acquisition frame rate setting.')
 
 
     (options, args) = parser.parse_args()
@@ -57,7 +47,7 @@ def extract_options(options):
 
 
 
-def connect_to_camera(connect_retries=50, frame_rate=None):
+def connect_to_camera(connect_retries=50, frame_rate=20., acquisition_line='Line3', enable_framerate=True):
     print('Searching for camera...')
 
     camera = None
@@ -93,10 +83,60 @@ def connect_to_camera(connect_retries=50, frame_rate=None):
         camera.Open()
         print("Bound to device: %s" % (camera.GetDeviceInfo().GetModelName()))
 
-    if frame_rate is not None:
-        camera.AcquisitionFrameRateEnable = True
-        camera.AcquisitionFrameRate = frame_rate
+    camera.AcquisitionFrameRateEnable = enable_framerate
+    camera.AcquisitionFrameRate = frame_rate
+    if enable_framerate:
+        camera.AcquisitionMode.SetValue('Continuous')
         print("Set acquisition frame rate: %.2f Hz" % camera.AcquisitionFrameRate())
+        for trigger_type in ['FrameStart', 'FrameBurstStart']:
+            camera.TriggerSelector = trigger_type
+            camera.TriggerMode = "Off"
+    else: 
+        # Set  trigger
+        camera.TriggerSelector = "FrameStart"
+        camera.TriggerMode = "On"
+        camera.TriggerSource.SetValue("acquisition_line")
+        camera.TriggerSelector.SetValue('FrameStart')
+        camera.TriggerActivation = 'RisingEdge'
+
+           
+
+    # Attach event handlers:
+    camera.RegisterImageEventHandler(SampleImageEventHandler(), pylon.RegistrationMode_Append, pylon.Cleanup_Delete)
+
+    # Set IO lines:
+    camera.LineSelector.SetValue(acquisition_line) # select GPIO 1
+    camera.LineMode.SetValue('Input')     # Set as input
+    #camera.LineStatus.SetValue(False)
+    # Output:
+    camera.LineSelector.SetValue('Line4')
+    camera.LineMode.SetValue('Output')
+    camera.LineSource.SetValue('UserOutput3') # Set source signal to User Output 1
+    camera.UserOutputSelector.SetValue('UserOutput3')
+    camera.UserOutputValue.SetValue(False)
+   
+        
+ 
+    # Set image format:
+    camera.Width.SetValue(960)
+    camera.Height.SetValue(600)
+    camera.BinningHorizontalMode.SetValue('Sum')
+    camera.BinningHorizontal.SetValue(2)
+    camera.BinningVerticalMode.SetValue('Sum')
+    camera.BinningVertical.SetValue(2)
+    camera.PixelFormat.SetValue('Mono8')
+
+    camera.ExposureMode.SetValue('Timed')
+    camera.ExposureTime.SetValue(30000)
+
+
+    try:
+        actual_framerate = camera.ResultingFrameRate.GetValue()
+        assert camera.AcquisitionFrameRate() <= camera.ResultingFrameRate(), "Unable to acquieve desired frame rate (%.2f Hz)" % float(camera.AcquisitionFrameRate.GetValue())
+    except AssertionError:
+        camera.AcquisitionFrameRate.SetValue(float(camera.ResultingFrameRate.GetValue()))
+        print("Set acquisition rate to: %.2f" % camera.AcquisitionFrameRate())
+
 
     return camera
 
@@ -104,7 +144,16 @@ def connect_to_camera(connect_retries=50, frame_rate=None):
 # compute a hash from the current time so that we don't accidentally overwrite old data
 #run_hash = hashlib.md5(str(time.time())).hexdigest()
 
+# ############################################
+# Camera functions
+# ############################################
 
+class SampleImageEventHandler(pylon.ImageEventHandler):
+    def OnImageGrabbed(self, camera, grabResult):
+        #print("CSampleImageEventHandler::OnImageGrabbed called.")
+        camera.UserOutputValue.SetValue(True)
+        #camera.UserOutputValue.SetValue(True)
+        
 if __name__ == '__main__':
 
     optsE = extract_options(sys.argv[1:])
@@ -139,9 +188,12 @@ if __name__ == '__main__':
 
     # -------------------------------------------------------------
     # Camera Setup
-    # -------------------------------------------------------------
+    # ------------------------------------------------------------     
+    enable_framerate = optsE.enable_framerate
+    acquisition_line = 'Line3'
+    camera = None
     if acquire_images:
-        camera = connect_to_camera(frame_rate=frame_rate)
+        camera = connect_to_camera(frame_rate=frame_rate, acquisition_line=acquisition_line, enable_framerate=enable_framerate)
 
     # -------------------------------------------------------------
     # Set up a thread to write stuff to disk
@@ -152,88 +204,49 @@ if __name__ == '__main__':
         im_queue = Queue()
 
 
-    # Create frame metadata file:
-    date_fmt = '%Y%m%d_%H%M%S%f'
-    tstamp = datetime.now().strftime(date_fmt)
-    if save_images: 
-        serial_outfile = os.path.join(output_dir, '%s_frame_metadata_%s.txt' % (basename, tstamp))
-        print("Creating outfile: %s" % serial_outfile)
-        #serial_file = open(serial_outfile, 'w')
-        #serial_file.write('frame\tframe_ID\tframe_tstamp\tacq_trigger\tstim_trigger\trelative_time\n')
 
 
-    # Start Arduino
-    port = optsE.port
-    baudrate = 115200
-    ser = Serial(port, baudrate, timeout=0.5)
-    print("Connecting to serial port - %s - baudrate %i" % (port,  baudrate))
-    time.sleep(1)
-    flushBuffer()
-    print('... flushed...')
-    sys.stdout.flush()
-    print("Connected serial port.")
-
-
-    ser.write('S'.encode())
-    print("-- triggered Arduino.")
-    print("Waiting for experiment start.")
-
-    time.sleep(1)
-    while 1:
-        first_byte = ser.read(1)
-        print(first_byte)
-        if first_byte is not b'':
-            disk_writer_alive = True            
-            session_start_time = time.clock()
-            start_key = 's'
-            second_byte = ser.read(1)
-            print(second_byte)
-            break 
-    print("... ... MW trigger received!")
-
-    def save_images_to_disk(serial_outfile):
+    def save_images_to_disk():
         print('Disk-saving thread active...')
-        n = 0
-        serial_file = open(serial_outfile, 'w+')
+
+        # Create frame metadata file:
+        date_fmt = '%Y%m%d_%H%M%S%f'
+        tstamp = datetime.now().strftime(date_fmt)
+        
+        serial_outfile = os.path.join(output_dir, '%s_frame_metadata_%s.txt' % (basename, tstamp))
         print("Created outfile: %s" % serial_outfile)
-        serial_file.write('frame\tframe_ID\tframe_tstamp\tacq_trigger\tstim_trigger\trelative_time\n')
+        serial_file = open(serial_outfile, 'w+')
+        serial_file.write('frame\tframe_ID\tframe_tstamp\tacq_trigger\tframe_trigger\trelative_time\trelative_camera_time\n')
 
+        n = 0
+        result = im_queue.get()
+        while result is not None: 
+            (im_array, metadata) = result
+            if n==0:
+                start_time = time.clock() 
+                cam_start_time = metadata['tstamp']
+            name = '%i_%i_%i' % (n, metadata['ID'], metadata['tstamp'])
+            if save_as_png:
+                fpath = os.path.join(frame_write_dir, '%s.png' % name)
+                cv2.imwrite(fpath, im_array)
+            else:
+                fpath = os.path.join(frame_write_dir, '%s.npz' % name)
+                np.savez_compressed(fpath, im_array)
 
-        while disk_writer_alive: 
-            if not im_queue.empty():            
-                try:
-                    result = im_queue.get()
-                    if result is None:
-                        break
-                    # unpack
-                    (im_array, metadata) = result
-                except e as Exception:
-                    break
-                
-                if n == 0:
-                    start_time = time.clock()
-                    print("Acquisition started!")
-                # print name
-                name = '%i_%i_%i' % (n, metadata['ID'], metadata['tstamp'])
-                if save_as_png:
-                    fpath = os.path.join(frame_write_dir, '%s.png' % name)
-                    cv2.imwrite(fpath, im_array)
-                else:
-                    fpath = os.path.join(frame_write_dir, '%s.npz' % name)
-                    np.savez_compressed(fpath, im_array)
+            serial_file.write('\t'.join([str(s) for s in [n, metadata['ID'], metadata['tstamp'], metadata['acq_trigger'], metadata['frame_trigger'], str(time.clock()-start_time), (metadata['tstamp']-cam_start_time)/1E9]]) + '\n')
+            n += 1
+            result = im_queue.get()
 
-                serial_file.write('\t'.join([str(s) for s in [n, metadata['ID'], metadata['tstamp'], metadata['acq_trigger'], metadata['stim_trigger'], str(time.clock()-start_time)]]) + '\n')
-                serial_file.flush()
-                #serial_file.write('%i\t%i\t%i\t%i\t%i\t%i\n' % (n, metadata['ID'], int(metadata['tstamp']), metadata['acq_trigger'], metadata['stim_trigger'], time.clock() - start_time))
-                n += 1
+        disk_writer_alive = False 
+        print('Disk-saving thread inactive...')
         serial_file.flush()
         serial_file.close()
-        print('Disk-saving thread inactive...')
+        print("Closed data file...")
 
     if save_in_separate_process:
-        disk_writer = mp.Process(target=save_images_to_disk, args=(serial_outfile,))
+        disk_writer = mp.Process(target=save_images_to_disk)
     else:
-        disk_writer = threading.Thread(target=save_images_to_disk, args=(serial_outfile,))
+        disk_writer = threading.Thread(target=save_images_to_disk)
 
     if save_images:
         disk_writer.daemon = True
@@ -246,71 +259,81 @@ if __name__ == '__main__':
     report_period = 60 # frames
     timeout_time = 1000
 
-    while True:
-        user_key = getkey()
-        if start_key == 's':
-            # Start acquiring
-            camera.StartGrabbing(pylon.GrabStrategy_OneByOne)
-            converter = pylon.ImageFormatConverter()
-            # converting to opencv bgr format
-            converter.OutputPixelFormat = pylon.PixelType_BGR8packed
-            converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
-            print('Beginning imaging [Hit ESC to quit]...')
-         
-            while camera.IsGrabbing():
-                t = time.time()
+    #if acquire_images:
+        # open stream
+        
+    camera.StartGrabbing(pylon.GrabStrategy_OneByOne)
+    converter = pylon.ImageFormatConverter()
+    # converting to opencv bgr format
+    converter.OutputPixelFormat = pylon.PixelType_BGR8packed
+    converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
+    
+    camera.LineSelector.SetValue(acquisition_line) 
+    sync_line = camera.LineSelector.GetValue()
+    sync_state = camera.LineStatus.GetValue()
+    print("Waiting for Acquisition Start trigger...", sync_state)
+    while sync_state is False: 
+        #print("[%s] trigger" % sync_line, sync_state)
+        sync_state = camera.LineStatus.GetValue()
 
-                # Grab a frame:
-                res = camera.RetrieveResult(timeout_time, pylon.TimeoutHandling_ThrowException)
-                if res.GrabSucceeded():
-                    # Access img data:
-                    im_native = res.Array
-                    im_to_show = converter.Convert(res)
-                    im_array = im_to_show.GetArray()
+    print("... ... MW trigger received!")
+    camera.AcquisitionStart.Execute()
 
-                    # Get IO sync events:
-                    read_byte = ser.read(1)
-                    acq_trigger = ord(read_byte)
-                    read_byte2 = ser.read(1)
-                    stim_trigger = ord(read_byte2) 
-                    print(read_byte, read_byte2)
-                    #print("acq: %i, stim: %i" % (acq_trigger, stim_trigger))
+    #while True:
+        #camera.WaitForFrameTriggerReady(100)
 
-                    meta = {'tstamp': res.TimeStamp, 
-                            'ID': res.ID,
-                            'number': res.ImageNumber,
-                            'acq_trigger': acq_trigger,
-                            'stim_trigger': stim_trigger}
-
-                nframes += 1
-                if save_images:
-                    im_queue.put((im_native, meta))
-
-                # Show image:
-                cv2.imshow('cam_window', im_array)
+    # Start acquiring
+    print('Beginning imaging [Hit ESC to quit]...')
+ 
+    camera.UserOutputValue.SetValue(False) 
+    while camera.IsGrabbing():
+        t = time.time()
                 
-                # Break out of the while loop if these keys are registered
-                key = cv2.waitKey(1)
-                if key == 27: # ESC
-                    start_key='q'
-                    break
-                res.Release()
+        #while camera.IsGrabbing():
+        # Grab a frame:
+        res = camera.RetrieveResult(timeout_time, pylon.TimeoutHandling_ThrowException)
+        if res.GrabSucceeded():
+            # Access img data:
+            im_native = res.Array
+            im_to_show = converter.Convert(res)
+            im_array = im_to_show.GetArray()
+            frame_state = camera.UserOutputValue.GetValue()
+            meta = {'tstamp': res.TimeStamp, 
+                    'ID': res.ID,
+                    'number': res.ImageNumber,
+                    'acq_trigger': sync_state,
+                    'frame_trigger': frame_state}
+            if save_images:
+                im_queue.put((im_native, meta))
+            nframes += 1
 
-                if nframes % report_period == 0:
-                    if last_t is not None:
-                        print('avg frame rate: %f [Hit ESC to quit]' % (report_period / (t - last_t)))
-                        print('ID: %i, nframes: %i, %s' % (meta['ID'], nframes, meta['tstamp']) )
-                    last_t = t
+        # Show image:
+        cv2.imshow('cam_window', im_array)
+        camera.UserOutputValue.SetValue(False)
 
-            # Relase the resource:
-            camera.StopGrabbing()
-            cv2.destroyAllWindows()
-
-            camera.Close() 
-
-        elif user_key == 'q':
-            start_key='q'
+        # Break out of the while loop if ESC registered
+        key = cv2.waitKey(1)
+        sync_state = camera.LineStatus.GetValue()
+        if key == 27 or sync_state is False: # ESC
             break
+        res.Release()
+
+        if nframes % report_period == 0:
+            if last_t is not None:
+                print('avg frame rate: %f [Hit ESC to quit]' % (report_period / (t - last_t)))
+                print('ID: %i, nframes: %i, %s' % (meta['ID'], nframes, meta['tstamp']) )
+            last_t = t
+
+    camera.AcquisitionStop.Execute()
+    #camera.AcquisitionStart.Execute()
+
+    # Relase the resource:
+    camera.UserOutputValue.SetValue(False) 
+    camera.StopGrabbing()
+    cv2.destroyAllWindows()
+
+    camera.Close() 
+
 
     if im_queue is not None:
         im_queue.put(None)
@@ -346,7 +369,7 @@ if __name__ == '__main__':
         # disk_writer.join()
         print('Disk writer terminated')        
         
-        ser.write('F'.encode())
+        #ser.write('F'.encode())
 
 
         #serial_file.flush()
