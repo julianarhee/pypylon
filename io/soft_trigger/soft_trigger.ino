@@ -50,15 +50,17 @@ void loop() {
               
             
             // // D0=0x01 D1=0x02 D2=0x04 D3=0x08 D4=0x10 D5=0x20 D6=0x40 D7=0x80
-            stimulus_status[0] = (PIND>>6) & 0x1; //bit-shift to the right and mask
-            acquisition_status[0] = (PIND>>7) &0x1;//bit-shift to the right and mask
+            stimulus_status[0] = (PIND>>7) & 0x1; //bit-shift to the right and mask
+            acquisition_status[0] = (PIND>>6) &0x1;//bit-shift to the right and mask
 
             //Serial.println(PIND, BIN);
             //Serial.println(String("Acq:") + acquisition_status[0] + String("| trial:") + stimulus_status[0]);
             }
             last_write = micros();
-            Serial.println(acquisition_status[0]);
-            Serial.println(stimulus_status[0]);            
+            //Serial.println(acquisition_status[0]);
+            //Serial.println(stimulus_status[0]);   
+            Serial.write(acquisition_status, 1);
+            Serial.write(stimulus_status, 1);       
           }
           if (Serial.available()>0){  
             serialByte=Serial.read();

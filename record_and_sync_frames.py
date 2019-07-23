@@ -95,14 +95,10 @@ def connect_to_camera(connect_retries=50, frame_rate=20., acquisition_line='Line
         # Set  trigger
         camera.TriggerSelector = "FrameStart"
         camera.TriggerMode = "On"
-        camera.TriggerSource.SetValue("acquisition_line")
-        camera.TriggerSelector.SetValue('FrameStart')
-        camera.TriggerActivation = 'RisingEdge'
-
-           
-
-    # Attach event handlers:
-    camera.RegisterImageEventHandler(SampleImageEventHandler(), pylon.RegistrationMode_Append, pylon.Cleanup_Delete)
+    
+    camera.TriggerSource.SetValue(acquisition_line)
+    #camera.TriggerSelector.SetValue('AcquisitionStart')
+    camera.TriggerActivation = 'RisingEdge'
 
     # Set IO lines:
     camera.LineSelector.SetValue(acquisition_line) # select GPIO 1
@@ -114,7 +110,7 @@ def connect_to_camera(connect_retries=50, frame_rate=20., acquisition_line='Line
     camera.LineSource.SetValue('UserOutput3') # Set source signal to User Output 1
     camera.UserOutputSelector.SetValue('UserOutput3')
     camera.UserOutputValue.SetValue(False)
-   
+      
         
  
     # Set image format:
@@ -127,7 +123,7 @@ def connect_to_camera(connect_retries=50, frame_rate=20., acquisition_line='Line
     camera.PixelFormat.SetValue('Mono8')
 
     camera.ExposureMode.SetValue('Timed')
-    camera.ExposureTime.SetValue(30000)
+    camera.ExposureTime.SetValue(40000)
 
 
     try:
@@ -194,6 +190,12 @@ if __name__ == '__main__':
     camera = None
     if acquire_images:
         camera = connect_to_camera(frame_rate=frame_rate, acquisition_line=acquisition_line, enable_framerate=enable_framerate)
+           
+    # Attach event handlers:
+    camera.RegisterImageEventHandler(SampleImageEventHandler(), pylon.RegistrationMode_Append, pylon.Cleanup_Delete)
+
+    time.sleep(1)
+    print("Camera ready!")
 
     # -------------------------------------------------------------
     # Set up a thread to write stuff to disk
@@ -202,9 +204,6 @@ if __name__ == '__main__':
         im_queue = mp.Queue()
     else:
         im_queue = Queue()
-
-
-
 
     def save_images_to_disk():
         print('Disk-saving thread active...')
@@ -225,6 +224,7 @@ if __name__ == '__main__':
             if n==0:
                 start_time = time.clock() 
                 cam_start_time = metadata['tstamp']
+
             name = '%i_%i_%i' % (n, metadata['ID'], metadata['tstamp'])
             if save_as_png:
                 fpath = os.path.join(frame_write_dir, '%s.png' % name)
@@ -259,12 +259,10 @@ if __name__ == '__main__':
     report_period = 60 # frames
     timeout_time = 1000
 
-    #if acquire_images:
-        # open stream
-        
-    camera.StartGrabbing(pylon.GrabStrategy_OneByOne)
+
+    camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly) #GrabStrategy_OneByOne)
+    # converting to opencv bgr format  
     converter = pylon.ImageFormatConverter()
-    # converting to opencv bgr format
     converter.OutputPixelFormat = pylon.PixelType_BGR8packed
     converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
     
@@ -284,13 +282,12 @@ if __name__ == '__main__':
 
     # Start acquiring
     print('Beginning imaging [Hit ESC to quit]...')
- 
-    camera.UserOutputValue.SetValue(False) 
     while camera.IsGrabbing():
         t = time.time()
                 
         #while camera.IsGrabbing():
         # Grab a frame:
+        #camera.WaitForFrameTriggerReady(100)
         res = camera.RetrieveResult(timeout_time, pylon.TimeoutHandling_ThrowException)
         if res.GrabSucceeded():
             # Access img data:
