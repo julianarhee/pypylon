@@ -83,7 +83,12 @@ dependencies:
   - xz=5.2.4=h14c3975_4
   - zlib=1.2.11=h7b6447c_3
   - pip:
+    - future==0.17.1
+    - iso8601==0.1.12
     - opencv-python==3.4.4.19
     - pypylon==1.3.1.dev2+pylon5.1.0
+    - pyserial==3.4
+    - pyyaml==5.1.1
+    - serial==0.0.97
 prefix: /home/labuser/anaconda3/envs/behavior
 
